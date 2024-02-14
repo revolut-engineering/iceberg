@@ -21,7 +21,6 @@ package org.apache.iceberg.spark.actions;
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
-import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -184,7 +183,7 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
   private CopyTable.Result doExecute() {
     rebuildMetaData();
     return new BaseCopyTableActionResult(
-        dataFileListPath, metadataFileListPath, fileName(endVersion));
+        stagingDir, dataFileListPath, metadataFileListPath, fileName(endVersion));
   }
 
   private void validateInputs() {
@@ -209,7 +208,7 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
 
     if (stagingDir.isEmpty()) {
       String stagingDirName = "copy-table-staging-" + UUID.randomUUID();
-      stagingDir = Paths.get(table.location(), stagingDirName).toString();
+      stagingDir = combinePaths(table.location(), stagingDirName);
     }
 
     if (!stagingDir.endsWith("/")) {
@@ -372,7 +371,7 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
   private Set<Long> rewriteVersionFiles(TableMetadata metadata) {
     Set<Long> allSnapshotIds = Sets.newHashSet();
 
-    String stagingPath = stagingPath(relativize(endVersion, sourcePrefix), stagingDir);
+    String stagingPath = combinePaths(stagingDir, relativize(endVersion, sourcePrefix));
     metadata.snapshots().forEach(snapshot -> allSnapshotIds.add(snapshot.snapshotId()));
     rewriteVersionFile(metadata, stagingPath);
 
@@ -386,7 +385,7 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
       Preconditions.checkArgument(
           fileExist(versionFilePath),
           String.format("Version file %s doesn't exist", versionFilePath));
-      String newPath = stagingPath(relativize(versionFilePath, sourcePrefix), stagingDir);
+      String newPath = combinePaths(stagingDir, relativize(versionFilePath, sourcePrefix));
       TableMetadata tableMetadata =
           new StaticTableOperations(versionFilePath, table.io()).current();
 
@@ -418,7 +417,7 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
   private void rewriteManifestList(Snapshot snapshot, TableMetadata tableMetadata) {
     List<ManifestFile> manifestFiles = manifestFilesInSnapshot(snapshot);
     String path = snapshot.manifestListLocation();
-    String stagingPath = stagingPath(relativize(path, sourcePrefix), stagingDir);
+    String stagingPath = combinePaths(stagingDir, relativize(path, sourcePrefix));
     OutputFile outputFile = table.io().newOutputFile(stagingPath);
     try (FileAppender<ManifestFile> writer =
         ManifestLists.write(
@@ -524,8 +523,8 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
             manifests.add(
                 writeDataManifest(
                     manifestFile,
-                    stagingLocation,
                     io,
+                    stagingLocation,
                     format,
                     specsById,
                     sourcePrefix,
@@ -535,8 +534,8 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
             manifests.add(
                 writeDeleteManifest(
                     manifestFile,
-                    stagingLocation,
                     io,
+                    stagingLocation,
                     format,
                     specsById,
                     sourcePrefix,
@@ -554,8 +553,8 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
 
   private static ManifestFile writeDataManifest(
       ManifestFile manifestFile,
-      String stagingLocation,
       Broadcast<FileIO> io,
+      String stagingLocation,
       int format,
       Map<Integer, PartitionSpec> specsById,
       String sourcePrefix,
@@ -563,7 +562,7 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
       throws IOException {
     PartitionSpec spec = specsById.get(manifestFile.partitionSpecId());
     String stagingPath =
-        stagingPath(relativize(manifestFile.path(), sourcePrefix), stagingLocation);
+        combinePaths(stagingLocation, relativize(manifestFile.path(), sourcePrefix));
     OutputFile outputFile = io.value().newOutputFile(stagingPath);
     ManifestWriter<DataFile> writer =
         ManifestFiles.write(format, spec, outputFile, manifestFile.snapshotId());
@@ -595,8 +594,8 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
 
   private static ManifestFile writeDeleteManifest(
       ManifestFile manifestFile,
-      String stagingLocation,
       Broadcast<FileIO> io,
+      String stagingLocation,
       int format,
       Map<Integer, PartitionSpec> specsById,
       String sourcePrefix,
@@ -605,7 +604,7 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
     PartitionSpec spec = specsById.get(manifestFile.partitionSpecId());
 
     String manifestStagingPath =
-        stagingPath(relativize(manifestFile.path(), sourcePrefix), stagingLocation);
+        combinePaths(stagingLocation, relativize(manifestFile.path(), sourcePrefix));
     OutputFile manifestOutputFile = io.value().newOutputFile(manifestStagingPath);
     ManifestWriter<DeleteFile> writer =
         ManifestFiles.writeDeleteManifest(
@@ -621,7 +620,7 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
         switch (file.content()) {
           case POSITION_DELETES:
             String deleteFileStagingPath =
-                stagingPath(relativize(file.path().toString(), sourcePrefix), stagingLocation);
+                combinePaths(stagingLocation, relativize(file.path().toString(), sourcePrefix));
             rewritePositionDeleteFile(
                 io, file, deleteFileStagingPath, spec, sourcePrefix, targetPrefix);
             appendEntryWithFile(
@@ -815,12 +814,8 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
     return path.replaceFirst(prefix, "");
   }
 
-  private static String stagingPath(String originalPath, String stagingLocation) {
-    return Paths.get(stagingLocation, originalPath).toString();
-  }
-
   private static String newPath(String path, String sourcePrefix, String targetPrefix) {
-    return Paths.get(targetPrefix, relativize(path, sourcePrefix)).toString();
+    return combinePaths(targetPrefix, relativize(path, sourcePrefix));
   }
 
   private void addToRebuiltFiles(String path) {
@@ -829,6 +824,15 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
 
   private String currentMetadataPath(Table tbl) {
     return ((HasTableOperations) tbl).operations().current().metadataFileLocation();
+  }
+
+  private static String combinePaths(String absolutePath, String relativePath) {
+    String combined = absolutePath;
+    if (!combined.endsWith("/")) {
+      combined += "/";
+    }
+    combined += relativePath;
+    return combined;
   }
 
   private static String fileName(String path) {

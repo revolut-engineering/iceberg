@@ -19,15 +19,22 @@
 package org.apache.iceberg.actions;
 
 public class BaseCopyTableActionResult implements CopyTable.Result {
-  private final String latestVersion;
+  private final String stagingDirPath;
   private final String dataFileListPath;
   private final String metadataFileListPath;
+  private final String latestVersion;
 
   public BaseCopyTableActionResult(
-      String dataFileListPath, String metadataFileListPath, String latestVersion) {
+      String stagingDirPath, String dataFileListPath, String metadataFileListPath, String latestVersion) {
+    this.stagingDirPath = stagingDirPath;
     this.dataFileListPath = dataFileListPath;
     this.metadataFileListPath = metadataFileListPath;
     this.latestVersion = latestVersion;
+  }
+
+  @Override
+  public String stagingLocation() {
+    return stagingDirPath;
   }
 
   @Override

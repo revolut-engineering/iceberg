@@ -76,6 +76,9 @@ public interface CopyTable extends Action<CopyTable, CopyTable.Result> {
 
   /** The action result that contains a summary of the execution. */
   interface Result {
+    /** Return staging location */
+    String stagingLocation();
+
     /** Return directory of data files list. */
     String dataFileListLocation();
 
