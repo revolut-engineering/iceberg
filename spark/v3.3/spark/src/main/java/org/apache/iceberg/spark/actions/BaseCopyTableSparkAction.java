@@ -807,11 +807,15 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
   }
 
   private static String relativize(String path, String prefix) {
-    if (!path.startsWith(prefix)) {
-      throw new IllegalArgumentException(
-          String.format("Path %s does not start with %s", path, prefix));
+    String toRemove = prefix;
+    if (!toRemove.endsWith("/")) {
+      toRemove += "/";
     }
-    return path.replaceFirst(prefix, "");
+    if (!path.startsWith(toRemove)) {
+      throw new IllegalArgumentException(
+          String.format("Path %s does not start with %s", path, toRemove));
+    }
+    return path.substring(toRemove.length());
   }
 
   private static String newPath(String path, String sourcePrefix, String targetPrefix) {
