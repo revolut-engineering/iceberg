@@ -36,10 +36,13 @@ import org.apache.iceberg.StaticTableOperations;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableProperties;
+import org.apache.iceberg.TestHelpers;
 import org.apache.iceberg.actions.ActionsProvider;
 import org.apache.iceberg.actions.CopyTable;
 import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.iceberg.data.FileHelpers;
+import org.apache.iceberg.data.GenericRecord;
+import org.apache.iceberg.data.Record;
 import org.apache.iceberg.hadoop.HadoopTables;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
@@ -268,7 +271,7 @@ public class TestCopyTableAction extends SparkTestBase {
   }
 
   @Test
-  public void testWithDeleteManifests() throws Exception {
+  public void testWithDeleteManifestsAndPositionDeletes() throws Exception {
     String location = newTableLocation();
     Table sourceTable = createATableWith2Snapshots(location);
     String targetLocation = newTableLocation();
@@ -287,10 +290,9 @@ public class TestCopyTableAction extends SparkTestBase {
     File file = new File(removePrefix(sourceTable.location()) + "/data/deeply/nested/file.parquet");
     DeleteFile positionDeletes =
         FileHelpers.writeDeleteFile(
-                table, sourceTable.io().newOutputFile(file.toURI().toString()), deletes)
+                sourceTable, sourceTable.io().newOutputFile(file.toURI().toString()), deletes)
             .first();
 
-    Dataset<Row> resultDF = spark.read().format("iceberg").load(location);
     sourceTable.newRowDelta().addDeletes(positionDeletes).commit();
 
     CopyTable.Result result =
@@ -308,6 +310,62 @@ public class TestCopyTableAction extends SparkTestBase {
     Assert.assertEquals(
         "The number of rows should be",
         1,
+        spark.read().format("iceberg").load(targetLocation).count());
+  }
+
+  @Test
+  public void testWithDeleteManifestsAndEqualityDeletes() throws Exception {
+    String location = newTableLocation();
+    Table sourceTable = createTableWithSnapshots(location, 1);
+    String targetLocation = newTableLocation();
+
+    // Add more varied data
+    List<ThreeColumnRecord> records =
+        Lists.newArrayList(
+            new ThreeColumnRecord(2, "AAAAAAAAAA", "AAAA"),
+            new ThreeColumnRecord(3, "BBBBBBBBBB", "BBBB"),
+            new ThreeColumnRecord(4, "CCCCCCCCCC", "CCCC"),
+            new ThreeColumnRecord(5, "DDDDDDDDDD", "DDDD"));
+    spark
+        .createDataFrame(records, ThreeColumnRecord.class)
+        .coalesce(1)
+        .select("c1", "c2", "c3")
+        .write()
+        .format("iceberg")
+        .mode("append")
+        .save(location);
+
+    Schema deleteRowSchema = sourceTable.schema().select("c2");
+    Record dataDelete = GenericRecord.create(deleteRowSchema);
+    List<Record> dataDeletes =
+        Lists.newArrayList(
+            dataDelete.copy("c2", "AAAAAAAAAA"), dataDelete.copy("c2", "CCCCCCCCCC"));
+    File file = new File(removePrefix(sourceTable.location()) + "/data/deeply/nested/file.parquet");
+    DeleteFile equalityDeletes =
+        FileHelpers.writeDeleteFile(
+            sourceTable,
+            sourceTable.io().newOutputFile(file.toURI().toString()),
+            TestHelpers.Row.of(0),
+            dataDeletes,
+            deleteRowSchema);
+    sourceTable.newRowDelta().addDeletes(equalityDeletes).commit();
+
+    CopyTable.Result result =
+        actions().copyTable(sourceTable).rewriteLocationPrefix(location, targetLocation).execute();
+
+    // We have four metadata files: for the table creation, for the initial snapshot, for the
+    // second append here, and for commit with equality deletes. Thus, we have three manifest lists
+    checkMetadataFileNum(4, 3, 3, result);
+    // A data file for each snapshot (two with data, one with equality deletes)
+    checkDataFileNum(3, result);
+
+    // copy the metadata files and data files
+    moveTableFiles(location, targetLocation, stagingDir(result));
+
+    // Equality deletes affect three rows, so just two rows must remain
+    Assert.assertEquals(
+        "The number of rows should be",
+        2,
         spark.read().format("iceberg").load(targetLocation).count());
   }
 

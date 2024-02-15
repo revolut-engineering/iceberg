@@ -517,7 +517,6 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
       List<ManifestFile> manifests = Lists.newArrayList();
       while (rows.hasNext()) {
         ManifestFile manifestFile = rows.next();
-
         switch (manifestFile.content()) {
           case DATA:
             manifests.add(
@@ -619,16 +618,28 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
 
         switch (file.content()) {
           case POSITION_DELETES:
+            String filePath = file.path().toString();
             String deleteFileStagingPath =
-                combinePaths(stagingLocation, relativize(file.path().toString(), sourcePrefix));
-            rewritePositionDeleteFile(
-                io, file, deleteFileStagingPath, spec, sourcePrefix, targetPrefix);
-            appendEntryWithFile(
-                entry, writer, newDeleteFile(file, spec, sourcePrefix, targetPrefix));
+                combinePaths(stagingLocation, relativize(filePath, sourcePrefix));
+            DeleteFile newDeleteFile =
+                rewritePositionDeleteFile(
+                    io, file, deleteFileStagingPath, spec, sourcePrefix, targetPrefix);
+
+            if (filePath.startsWith(sourcePrefix)) {
+              filePath = newPath(filePath, sourcePrefix, targetPrefix);
+              newDeleteFile =
+                  FileMetadata.deleteFileBuilder(spec)
+                      .ofPositionDeletes()
+                      .copy(newDeleteFile)
+                      .withPath(filePath)
+                      .withSplitOffsets(file.splitOffsets())
+                      .build();
+            }
+            appendEntryWithFile(entry, writer, newDeleteFile);
             break;
           case EQUALITY_DELETES:
             appendEntryWithFile(
-                entry, writer, newDeleteFile(file, spec, sourcePrefix, targetPrefix));
+                entry, writer, newEqualityDeleteFile(file, spec, sourcePrefix, targetPrefix));
             break;
           default:
             throw new UnsupportedOperationException(
@@ -641,13 +652,22 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
     return writer.toManifestFile();
   }
 
-  private static DeleteFile newDeleteFile(
+  private static DeleteFile newEqualityDeleteFile(
       DeleteFile file, PartitionSpec spec, String sourcePrefix, String targetPrefix) {
     DeleteFile transformedFile = file;
     String filePath = file.path().toString();
+
     if (filePath.startsWith(sourcePrefix)) {
+      int[] equalityFieldIds =
+          file.equalityFieldIds().stream().mapToInt(Integer::intValue).toArray();
       filePath = newPath(filePath, sourcePrefix, targetPrefix);
-      transformedFile = FileMetadata.deleteFileBuilder(spec).copy(file).withPath(filePath).build();
+      transformedFile =
+          FileMetadata.deleteFileBuilder(spec)
+              .ofEqualityDeletes(equalityFieldIds)
+              .copy(file)
+              .withPath(filePath)
+              .withSplitOffsets(file.splitOffsets())
+              .build();
     }
     return transformedFile;
   }
