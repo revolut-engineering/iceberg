@@ -28,6 +28,7 @@ import org.apache.commons.io.FileUtils;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.iceberg.AssertHelpers;
 import org.apache.iceberg.BaseTable;
+import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.HasTableOperations;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
@@ -35,9 +36,13 @@ import org.apache.iceberg.StaticTableOperations;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableProperties;
+import org.apache.iceberg.TestHelpers;
 import org.apache.iceberg.actions.ActionsProvider;
 import org.apache.iceberg.actions.CopyTable;
 import org.apache.iceberg.catalog.TableIdentifier;
+import org.apache.iceberg.data.FileHelpers;
+import org.apache.iceberg.data.GenericRecord;
+import org.apache.iceberg.data.Record;
 import org.apache.iceberg.hadoop.HadoopTables;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.relocated.com.google.common.collect.Lists;
@@ -46,6 +51,7 @@ import org.apache.iceberg.spark.SparkCatalog;
 import org.apache.iceberg.spark.SparkTestBase;
 import org.apache.iceberg.spark.source.ThreeColumnRecord;
 import org.apache.iceberg.types.Types;
+import org.apache.iceberg.util.Pair;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Encoders;
 import org.apache.spark.sql.Row;
@@ -262,6 +268,105 @@ public class TestCopyTableAction extends SparkTestBase {
         "There are only one row left since we deleted a data file",
         1,
         resultDF.as(Encoders.bean(ThreeColumnRecord.class)).count());
+  }
+
+  @Test
+  public void testWithDeleteManifestsAndPositionDeletes() throws Exception {
+    String location = newTableLocation();
+    Table sourceTable = createATableWith2Snapshots(location);
+    String targetLocation = newTableLocation();
+
+    List<Pair<CharSequence, Long>> deletes =
+        Lists.newArrayList(
+            Pair.of(
+                sourceTable
+                    .currentSnapshot()
+                    .addedDataFiles(sourceTable.io())
+                    .iterator()
+                    .next()
+                    .path(),
+                0L));
+
+    File file = new File(removePrefix(sourceTable.location()) + "/data/deeply/nested/file.parquet");
+    DeleteFile positionDeletes =
+        FileHelpers.writeDeleteFile(
+                sourceTable, sourceTable.io().newOutputFile(file.toURI().toString()), deletes)
+            .first();
+
+    sourceTable.newRowDelta().addDeletes(positionDeletes).commit();
+
+    CopyTable.Result result =
+        actions().copyTable(sourceTable).rewriteLocationPrefix(location, targetLocation).execute();
+
+    // We have one more snapshot, an additional manifest list, and a new (delete) manifest
+    checkMetadataFileNum(4, 3, 3, result);
+    // We have one additional file for positional deletes
+    checkDataFileNum(3, result);
+
+    // copy the metadata files and data files
+    moveTableFiles(location, targetLocation, stagingDir(result));
+
+    // Positional delete affects a single row, so only one row must remain
+    Assert.assertEquals(
+        "The number of rows should be",
+        1,
+        spark.read().format("iceberg").load(targetLocation).count());
+  }
+
+  @Test
+  public void testWithDeleteManifestsAndEqualityDeletes() throws Exception {
+    String location = newTableLocation();
+    Table sourceTable = createTableWithSnapshots(location, 1);
+    String targetLocation = newTableLocation();
+
+    // Add more varied data
+    List<ThreeColumnRecord> records =
+        Lists.newArrayList(
+            new ThreeColumnRecord(2, "AAAAAAAAAA", "AAAA"),
+            new ThreeColumnRecord(3, "BBBBBBBBBB", "BBBB"),
+            new ThreeColumnRecord(4, "CCCCCCCCCC", "CCCC"),
+            new ThreeColumnRecord(5, "DDDDDDDDDD", "DDDD"));
+    spark
+        .createDataFrame(records, ThreeColumnRecord.class)
+        .coalesce(1)
+        .select("c1", "c2", "c3")
+        .write()
+        .format("iceberg")
+        .mode("append")
+        .save(location);
+
+    Schema deleteRowSchema = sourceTable.schema().select("c2");
+    Record dataDelete = GenericRecord.create(deleteRowSchema);
+    List<Record> dataDeletes =
+        Lists.newArrayList(
+            dataDelete.copy("c2", "AAAAAAAAAA"), dataDelete.copy("c2", "CCCCCCCCCC"));
+    File file = new File(removePrefix(sourceTable.location()) + "/data/deeply/nested/file.parquet");
+    DeleteFile equalityDeletes =
+        FileHelpers.writeDeleteFile(
+            sourceTable,
+            sourceTable.io().newOutputFile(file.toURI().toString()),
+            TestHelpers.Row.of(0),
+            dataDeletes,
+            deleteRowSchema);
+    sourceTable.newRowDelta().addDeletes(equalityDeletes).commit();
+
+    CopyTable.Result result =
+        actions().copyTable(sourceTable).rewriteLocationPrefix(location, targetLocation).execute();
+
+    // We have four metadata files: for the table creation, for the initial snapshot, for the
+    // second append here, and for commit with equality deletes. Thus, we have three manifest lists
+    checkMetadataFileNum(4, 3, 3, result);
+    // A data file for each snapshot (two with data, one with equality deletes)
+    checkDataFileNum(3, result);
+
+    // copy the metadata files and data files
+    moveTableFiles(location, targetLocation, stagingDir(result));
+
+    // Equality deletes affect three rows, so just two rows must remain
+    Assert.assertEquals(
+        "The number of rows should be",
+        2,
+        spark.read().format("iceberg").load(targetLocation).count());
   }
 
   @Test
@@ -690,8 +795,8 @@ public class TestCopyTableAction extends SparkTestBase {
       throws Exception {
     FileUtils.copyDirectory(
         new File(removePrefix(sourceDir) + "data/"), new File(removePrefix(targetDir) + "/data/"));
-    FileUtils.copyDirectory(
-        new File(removePrefix(stagingDir)), new File(removePrefix(targetDir) + "/metadata/"));
+    // Copy staged metadata files, overwrite previously copied data files with staged ones
+    FileUtils.copyDirectory(new File(removePrefix(stagingDir)), new File(removePrefix(targetDir)));
   }
 
   private String removePrefix(String path) {
