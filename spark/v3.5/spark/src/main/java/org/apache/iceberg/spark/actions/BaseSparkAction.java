@@ -32,19 +32,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
-import org.apache.iceberg.AllManifestsTable;
-import org.apache.iceberg.BaseTable;
-import org.apache.iceberg.ContentFile;
-import org.apache.iceberg.DataFile;
-import org.apache.iceberg.FileContent;
-import org.apache.iceberg.ManifestContent;
-import org.apache.iceberg.ManifestFiles;
-import org.apache.iceberg.MetadataTableType;
-import org.apache.iceberg.PartitionSpec;
-import org.apache.iceberg.ReachableFileUtil;
-import org.apache.iceberg.StaticTableOperations;
-import org.apache.iceberg.Table;
-import org.apache.iceberg.TableMetadata;
+
+import org.apache.iceberg.*;
 import org.apache.iceberg.exceptions.NotFoundException;
 import org.apache.iceberg.exceptions.ValidationException;
 import org.apache.iceberg.io.BulkDeletionFailureException;
@@ -68,10 +57,7 @@ import org.apache.iceberg.util.Tasks;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.api.java.function.FlatMapFunction;
 import org.apache.spark.broadcast.Broadcast;
-import org.apache.spark.sql.Column;
-import org.apache.spark.sql.Dataset;
-import org.apache.spark.sql.Row;
-import org.apache.spark.sql.SparkSession;
+import org.apache.spark.sql.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -139,6 +125,10 @@ abstract class BaseSparkAction<ThisT> {
     return new BaseTable(ops, metadata.metadataFileLocation());
   }
 
+  protected Table newStaticTable(String metadataFileLocation, FileIO io) {
+    StaticTableOperations ops = new StaticTableOperations(metadataFileLocation, io);
+    return new BaseTable(ops, metadataFileLocation);
+  }
   protected Dataset<FileInfo> contentFileDS(Table table) {
     return contentFileDS(table, null);
   }
@@ -172,6 +162,80 @@ abstract class BaseSparkAction<ThisT> {
     return manifestDF(table, snapshotIds)
         .select(col("path"), lit(MANIFEST).as("type"))
         .as(FileInfo.ENCODER);
+  }
+
+  protected Dataset<Row> buildValidDataFileDF(Table table) {
+    JavaSparkContext context = JavaSparkContext.fromSparkContext(spark.sparkContext());
+    Broadcast<Table> tableBroadcast = context.broadcast(SerializableTable.copyOf(table));
+
+    Dataset<ManifestFileBean> allManifests =
+            loadMetadataTable(table, ALL_MANIFESTS)
+                    .selectExpr(
+                            "content",
+                            "path",
+                            "length",
+                            "0 as sequenceNumber",
+                            "partition_spec_id as partitionSpecId",
+                            "added_snapshot_id as addedSnapshotId")
+                    .dropDuplicates("path")
+                    .repartition(
+                            spark
+                                    .sessionState()
+                                    .conf()
+                                    .numShufflePartitions()) // avoid adaptive execution combining tasks
+                    .as(Encoders.bean(ManifestFileBean.class));
+
+    return allManifests
+            .flatMap(new ReadManifest(tableBroadcast), FileInfo.ENCODER)
+            .toDF("file_path", "file_type")
+            .drop("file_type");
+  }
+
+  protected Dataset<Row> buildManifestFileDF(Table table) {
+    return loadMetadataTable(table, ALL_MANIFESTS).select(col("path").as(FILE_PATH));
+  }
+
+  /**
+   * Returns all the path locations of all Manifest Lists for a given list of snapshots
+   *
+   * @param snapshots snapshots
+   * @return the paths of the Manifest Lists
+   */
+  private List<String> getManifestListPaths(Iterable<Snapshot> snapshots) {
+    List<String> manifestLists = Lists.newArrayList();
+    for (Snapshot snapshot : snapshots) {
+      String manifestListLocation = snapshot.manifestListLocation();
+      if (manifestListLocation != null) {
+        manifestLists.add(manifestListLocation);
+      }
+    }
+    return manifestLists;
+  }
+
+  protected Dataset<Row> buildManifestListDF(Table table) {
+    List<String> manifestLists = getManifestListPaths(table.snapshots());
+    return spark.createDataset(manifestLists, Encoders.STRING()).toDF("file_path");
+  }
+
+  private Dataset<Row> buildOtherMetadataFileDF(
+          Table table, boolean includePreviousMetadataLocations) {
+    List<String> otherMetadataFiles = Lists.newArrayList();
+    otherMetadataFiles.addAll(
+            ReachableFileUtil.metadataFileLocations(table, includePreviousMetadataLocations));
+    otherMetadataFiles.add(ReachableFileUtil.versionHintLocation(table));
+    return spark.createDataset(otherMetadataFiles, Encoders.STRING()).toDF(FILE_PATH);
+  }
+
+  protected Dataset<Row> buildOtherMetadataFileDF(Table table) {
+    return buildOtherMetadataFileDF(
+            table, false /* include all reachable previous metadata locations */);
+  }
+
+  protected Dataset<Row> buildValidMetadataFileDF(Table table) {
+    Dataset<Row> manifestDF = buildManifestFileDF(table);
+    Dataset<Row> manifestListDF = buildManifestListDF(table);
+    Dataset<Row> otherMetadataFileDF = buildOtherMetadataFileDF(table);
+    return manifestDF.union(otherMetadataFileDF).union(manifestListDF);
   }
 
   private Dataset<Row> manifestDF(Table table, Set<Long> snapshotIds) {
