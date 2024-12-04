@@ -314,6 +314,51 @@ public class TestCopyTableAction extends SparkTestBase {
   }
 
   @Test
+  public void testWithDeleteManifestsAndPositionDeletesMultipleSnapshots() throws Exception {
+    String location = newTableLocation();
+    Table sourceTable = createATableWith2Snapshots(location);
+    String targetLocation = newTableLocation();
+
+    List<Pair<CharSequence, Long>> deletes =
+        Lists.newArrayList(
+            Pair.of(
+                sourceTable
+                    .currentSnapshot()
+                    .addedDataFiles(sourceTable.io())
+                    .iterator()
+                    .next()
+                    .path(),
+                0L));
+
+    File file = new File(removePrefix(sourceTable.location()) + "/data/deeply/nested/file.parquet");
+    DeleteFile positionDeletes =
+        FileHelpers.writeDeleteFile(
+                sourceTable, sourceTable.io().newOutputFile(file.toURI().toString()), deletes)
+            .first();
+
+    sourceTable.newRowDelta().addDeletes(positionDeletes).commit();
+    // Creating another snapshot
+    sourceTable.newRowDelta().addDeletes(positionDeletes).commit();
+
+    CopyTable.Result result =
+        actions().copyTable(sourceTable).rewriteLocationPrefix(location, targetLocation).execute();
+
+    // We have one more snapshot, an additional manifest list, and a new (delete) manifest
+    checkMetadataFileNum(5, 4, 4, result);
+    // We have one additional file for positional deletes
+    checkDataFileNum(4, result);
+
+    // copy the metadata files and data files
+    moveTableFiles(location, targetLocation, stagingDir(result));
+
+    // Positional delete affects a single row, so only one row must remain
+    Assert.assertEquals(
+        "The number of rows should be",
+        1,
+        spark.read().format("iceberg").load(targetLocation).count());
+  }
+
+  @Test
   public void testWithDeleteManifestsAndEqualityDeletes() throws Exception {
     String location = newTableLocation();
     Table sourceTable = createTableWithSnapshots(location, 1);

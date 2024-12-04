@@ -621,10 +621,24 @@ public class BaseCopyTableSparkAction extends BaseSparkAction<CopyTable> impleme
             String filePath = file.path().toString();
             String deleteFileStagingPath =
                 combinePaths(stagingLocation, relativize(filePath, sourcePrefix));
-            DeleteFile newDeleteFile =
-                rewritePositionDeleteFile(
-                    io, file, deleteFileStagingPath, spec, sourcePrefix, targetPrefix);
-
+            InputFile deleteFileStaging = io.getValue().newInputFile(deleteFileStagingPath);
+            DeleteFile newDeleteFile;
+            if (deleteFileStaging.exists()) {
+              // File already exists, use it to construct a new DeleteFile
+              newDeleteFile =
+                  FileMetadata.deleteFileBuilder(spec)
+                      .ofPositionDeletes()
+                      .withPath(deleteFileStagingPath)
+                      .withFileSizeInBytes(deleteFileStaging.getLength())
+                      .withSplitOffsets(file.splitOffsets())
+                      .withRecordCount(file.recordCount())
+                      .build();
+            } else {
+              // Rewrite the delete file since it doesn't exist
+              newDeleteFile =
+                  rewritePositionDeleteFile(
+                      io, file, deleteFileStagingPath, spec, sourcePrefix, targetPrefix);
+            }
             if (filePath.startsWith(sourcePrefix)) {
               filePath = newPath(filePath, sourcePrefix, targetPrefix);
               newDeleteFile =
