@@ -20,7 +20,7 @@ package org.apache.iceberg.spark.actions;
 
 import org.apache.iceberg.Table;
 import org.apache.iceberg.actions.ActionsProvider;
-import org.apache.iceberg.actions.CopyTable;
+import org.apache.iceberg.actions.ComputeTableStats;
 import org.apache.iceberg.spark.Spark3Util;
 import org.apache.iceberg.spark.Spark3Util.CatalogAndIdentifier;
 import org.apache.spark.sql.SparkSession;
@@ -53,9 +53,9 @@ public class SparkActions implements ActionsProvider {
     String ctx = "snapshot source";
     CatalogPlugin defaultCatalog = spark.sessionState().catalogManager().currentCatalog();
     CatalogAndIdentifier catalogAndIdent =
-        Spark3Util.catalogAndIdentifier(ctx, spark, tableIdent, defaultCatalog);
+            Spark3Util.catalogAndIdentifier(ctx, spark, tableIdent, defaultCatalog);
     return new SnapshotTableSparkAction(
-        spark, catalogAndIdent.catalog(), catalogAndIdent.identifier());
+            spark, catalogAndIdent.catalog(), catalogAndIdent.identifier());
   }
 
   @Override
@@ -63,9 +63,9 @@ public class SparkActions implements ActionsProvider {
     String ctx = "migrate target";
     CatalogPlugin defaultCatalog = spark.sessionState().catalogManager().currentCatalog();
     CatalogAndIdentifier catalogAndIdent =
-        Spark3Util.catalogAndIdentifier(ctx, spark, tableIdent, defaultCatalog);
+            Spark3Util.catalogAndIdentifier(ctx, spark, tableIdent, defaultCatalog);
     return new MigrateTableSparkAction(
-        spark, catalogAndIdent.catalog(), catalogAndIdent.identifier());
+            spark, catalogAndIdent.catalog(), catalogAndIdent.identifier());
   }
 
   @Override
@@ -99,7 +99,7 @@ public class SparkActions implements ActionsProvider {
   }
 
   @Override
-  public CopyTable copyTable(Table table) {
-    return new BaseCopyTableSparkAction(spark, table);
+  public ComputeTableStats computeTableStats(Table table) {
+    return new ComputeTableStatsSparkAction(spark, table);
   }
 }
